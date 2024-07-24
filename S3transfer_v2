@@ -1,0 +1,21 @@
+import boto3
+from boto3.s3.transfer import S3Transfer
+import os
+
+airflow_home = os.environ['AIRFLOW_HOME']
+access_key = ''
+secret_key = ''
+
+filepath = f'{airflow_home}/downloads/title.ratings.tsv.gz'
+
+s3_bucket_name = 'mynvl-aws-bucket'
+s3_filename = 'title.ratings.tsv.gz'
+
+client = boto3.client(
+    's3', aws_access_key_id=access_key,
+    aws_secret_access_key=secret_key
+)
+
+transfer = S3Transfer(client)
+
+transfer.upload_file(filepath, s3_bucket_name, s3_filename)
