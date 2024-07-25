@@ -8,6 +8,8 @@ from urllib import request
 
 import os
 
+from airflow.utils.task_group import TaskGroup
+
 airflow_home = os.environ['AIRFLOW_HOME']
 # def print_context(**kwargs):
 #     print(f'Day la thong so cua kwargs: {kwargs}')
@@ -71,45 +73,48 @@ with DAG(
         bash_command='gunzip --force /tmp/var/wikipageviews.gz',
     )
 
-    create_table_postgres = PostgresOperator(
-        task_id='create_table_postgres',
-        postgres_conn_id='postgres_conn',
-        sql="""
-                CREATE TABLE IF NOT EXISTS page_view_counts (
-                    page_name VARCHAR(50) NOT NULL,
-                    page_view_count INT NOT NULL,
-                    date_time TIMESTAMP NOT NULL
-                )
-            """
-    )
+    with TaskGroup('TaskGroup1') as tg1:
+        fetch_data_into_postgres = PythonOperator(
+            task_id='fetch_data',
+            python_callable=fetch_data,
+            op_kwargs={
+                "pagenames": ["Google", "Amazon", "Microsoft", "Apple", "Facebook"],
+                "fetch_path": "/tmp/var/wikipageviews",
+                "path_sql_execute": "/tmp/var/insert_query.sql",
+                "_date": "{{execution_date}}"
+            }
+        )
 
-    fetch_data_into_postgres = PythonOperator(
-        task_id='fetch_data',
-        python_callable=fetch_data,
-        op_kwargs={
-            "pagenames": ["Google", "Amazon", "Microsoft", "Apple", "Facebook"],
-            "fetch_path": "/tmp/var/wikipageviews",
-            "path_sql_execute": "/tmp/var/insert_query.sql",
-            "_date": "{{execution_date}}"
-        }
-    )
+        create_table_postgres = PostgresOperator(
+            task_id='create_table_postgres',
+            postgres_conn_id='postgres_conn',
+            sql="""
+                    CREATE TABLE IF NOT EXISTS page_view_counts (
+                        page_name VARCHAR(50) NOT NULL,
+                        page_view_count INT NOT NULL,
+                        date_time TIMESTAMP NOT NULL
+                    )
+                """
+        )
 
-    write_to_postgres = PostgresOperator(
-        task_id='write_to_postgres',
-        postgres_conn_id='postgres_conn',
-        sql='insert_query.sql'
-    )
+        write_to_postgres = PostgresOperator(
+            task_id='write_to_postgres',
+            postgres_conn_id='postgres_conn',
+            sql='insert_query.sql'
+        )
+        create_table_postgres >> fetch_data_into_postgres >> write_to_postgres
 
-    s3_copy_operator = BashOperator(
-        task_id='s3_copy_to_bucket',
-        bash_command=f'python {airflow_home}/scripts/S3transfer.py'
-    )
+    with TaskGroup('TaskGroup2') as tg2:
+        s3_copy_operator = BashOperator(
+            task_id='s3_copy_to_bucket',
+            bash_command=f'python {airflow_home}/scripts/S3transfer.py'
+        )
 
-    snowflake_copy_operator = BashOperator(
-        task_id='snowflake_copy_from_s3_to_table',
-        bash_command=f'pip install pyarrow==15.0 snowflake-sqlalchemy==1.5.0 snowflake-connector-python==3.11.0 && '
-                     f'python {airflow_home}/scripts/Snowflake_copy.py'
-    )
+        snowflake_copy_operator = BashOperator(
+            task_id='snowflake_copy_from_s3_to_table',
+            bash_command=f'pip install pyarrow==15.0 snowflake-sqlalchemy==1.5.0 snowflake-connector-python==3.11.0 && '
+                         f'python {airflow_home}/scripts/Snowflake_copy.py'
+        )
+        s3_copy_operator >> snowflake_copy_operator
 
-
-data_wikimedia_from_pythoncode >> extract_gz >> create_table_postgres >> fetch_data_into_postgres >> write_to_postgres >> s3_copy_operator >> snowflake_copy_operator
+data_wikimedia_from_pythoncode >> extract_gz >> [tg1, tg2]
